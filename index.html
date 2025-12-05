@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UPS 帳單彙整（Net Charge）</title>
+  <!-- IMPORTANT: This file must be opened as a real webpage (local file in browser, or hosted).
+       If you preview it inside Google Drive/Notion/etc, scripts will be blocked and nothing will work. -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root{
+      --bg:#0b1220; --muted:#9fb0d0; --text:#e8efff; --line:rgba(255,255,255,.12);
+      --shadow: 0 18px 50px rgba(0,0,0,.45); --radius:18px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans TC","PingFang TC","Microsoft JhengHei", Arial;
+      --warn:#ffcc66; --good:#73f3c5; --bad:#ff6b8a;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family:var(--sans); color:var(--text);
+      background:
+        radial-gradient(1200px 500px at 20% -10%, rgba(122,162,255,.30), transparent 60%),
+        radial-gradient(900px 500px at 90% 0%, rgba(115,243,197,.18), transparent 55%),
+        radial-gradient(900px 650px at 30% 120%, rgba(255,107,138,.14), transparent 55%),
+        var(--bg);
+      min-height:100vh;
+    }
+    header{max-width:1100px;margin:28px auto 0;padding:0 18px;display:flex;justify-content:space-between;align-items:center;gap:12px;}
+    h1{margin:0;font-size:20px}
+    .pill{color:var(--muted);background:rgba(255,255,255,.06);border:1px solid var(--line);padding:8px 12px;border-radius:999px;box-shadow:0 10px 20px rgba(0,0,0,.2);font-size:13px;white-space:nowrap}
+    main{max-width:1100px;margin:14px auto 30px;padding:0 18px;display:grid;grid-template-columns:1fr;gap:14px;}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+    .hd{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:700}
+    .bd{padding:14px 16px}
+    .banner{
+      max-width:1100px;margin:14px auto 0;padding:0 18px;
+    }
+    .notice{
+      border:1px solid rgba(255,204,102,.35);
+      background:rgba(255,204,102,.07);
+      color:var(--text);
+      border-radius:16px;
+      padding:12px 14px;
+      line-height:1.5;
+      box-shadow:0 18px 50px rgba(0,0,0,.25);
+    }
+    .notice strong{color:var(--warn)}
+    .status{
+      display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;
+      font-family:var(--mono); font-size:12px; color:var(--muted);
+    }
+    .chip{
+      border:1px solid var(--line); border-radius:999px; padding:6px 10px;
+      background:rgba(255,255,255,.05);
+    }
+    .chip.good{border-color:rgba(115,243,197,.35); color:var(--good)}
+    .chip.bad{border-color:rgba(255,107,138,.35); color:var(--bad)}
+    .drop{border:1px dashed rgba(255,255,255,.25);border-radius:16px;padding:18px;background:rgba(255,255,255,.03); text-align:center;}
+    .drop strong{display:block;margin-bottom:6px}
+    .drop span{color:var(--muted);font-size:13px}
+    input[type=file]{margin-top:12px;width:100%}
+    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:14px}
+    .row > div{flex:1;min-width:220px}
+    label{color:var(--muted);font-size:13px;display:block;margin-bottom:6px}
+    input[type=text]{
+      width:100%;padding:10px 12px;border-radius:14px;border:1px solid var(--line);
+      background:rgba(255,255,255,.04);color:var(--text);outline:none;
+      font-family:var(--mono); font-size:12.5px;
+    }
+    button{
+      border:1px solid var(--line); background:rgba(255,255,255,.06); color:var(--text);
+      padding:10px 12px;border-radius:14px;cursor:pointer;font-weight:650;
+    }
+    button.primary{
+      background:linear-gradient(90deg, rgba(122,162,255,.85), rgba(115,243,197,.55));
+      border-color:rgba(255,255,255,.18); color:#061021;
+    }
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .hint{color:var(--muted);font-size:12.5px;line-height:1.5;margin-top:8px}
+    pre{
+      background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.10);
+      border-radius:14px;padding:12px;overflow:auto;color:#dfe8ff;font-family:var(--mono);font-size:12px;max-height:260px;
+    }
+    table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(255,255,255,.02);min-width:980px}
+    .tableWrap{overflow:auto;border:1px solid var(--line);border-radius:16px}
+    th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);white-space:nowrap;font-size:13px}
+    thead th{position:sticky;top:0;background:rgba(15,26,46,.92);backdrop-filter:blur(6px);color:#d8e4ff;border-bottom:1px solid var(--line);text-align:left;font-size:12.5px}
+  </style>
+</head>
+<body>
+<header>
+  <h1>UPS 帳單彙整（Net Charge）</h1>
+  <div class="pill">多檔 PDF → Summary + Adjustments → 匯出 Excel</div>
+</header>
+
+<div class="banner">
+  <div class="notice" id="notice">
+    <div><strong>如果你是在 Google Drive / Notion / 企業入口網「預覽」這個 HTML</strong>，通常 JavaScript 會被封鎖，所以按鈕會「看得到但不能用」。</div>
+    <div>解法：請先把檔案<strong>下載到電腦</strong>，再用 Chrome 直接打開（或部署到 GitHub Pages）。</div>
+    <div class="status" id="statusRow"></div>
+  </div>
+</div>
+
+<main>
+  <section class="card">
+    <div class="hd">① 上傳帳單 PDF（可多選）</div>
+    <div class="bd">
+      <div id="drop" class="drop">
+        <strong>把 UPS 帳單 PDF 拖進來</strong>
+        <span>或使用下方選檔（多選）</span>
+        <input id="file" type="file" accept="application/pdf" multiple />
+      </div>
+
+      <div class="row">
+        <div>
+          <label>免稅費用項目（不計入營業稅基礎；用 | 分隔）</label>
+          <input id="exempt" type="text" value="VAT|Disbursement Fee|Entry Prep Fee|Paper Commercial Invoice" />
+        </div>
+        <div>
+          <label>營業稅率（例：0.05）</label>
+          <input id="taxRate" type="text" value="0.05" />
+        </div>
+        <div>
+          <button id="run" class="primary" disabled>開始彙整</button>
+          <button id="export" disabled>下載 Excel</button>
+        </div>
+      </div>
+
+      <div class="hint">
+        - Summary：抓 Waybill Summary 的每票費用（取最右側 Net/Charge）。<br/>
+        - Adjustments：抓 Adjustment/Adjustment Total 類頁面的費用，另外列出（不混在 Summary）。<br/>
+        - 年份：每份 PDF 先從頁面文字找 Invoice Date 的年份，然後套在出貨日期上。<br/>
+        - 數字：四捨五入到個位數；營業稅 = (總額扣掉免稅項) × 稅率。
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="hd">② 執行紀錄</div>
+    <div class="bd"><pre id="log">尚未開始</pre></div>
+  </section>
+
+  <section class="card">
+    <div class="hd">③ 預覽（Summary 前 200 列）</div>
+    <div class="bd">
+      <div class="tableWrap">
+        <table id="tbl">
+          <thead></thead><tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+  // If scripts are blocked, this script won't run — but then the page is not usable anyway.
+  const $ = (id) => document.getElementById(id);
+  const log = (msg) => { $("log").textContent += ( ($("log").textContent==="尚未開始") ? "" : "\\n") + msg; };
+
+  function addChip(text, ok){
+    const el = document.createElement("div");
+    el.className = "chip " + (ok ? "good" : "bad");
+    el.textContent = text;
+    $("statusRow").appendChild(el);
+  }
+
+  // Basic runtime checks (help user self-diagnose)
+  (function bootChecks(){
+    const okPdf = typeof window.pdfjsLib !== "undefined";
+    const okXlsx = typeof window.XLSX !== "undefined";
+    addChip("pdf.js: " + (okPdf ? "OK" : "缺少"), okPdf);
+    addChip("xlsx: " + (okXlsx ? "OK" : "缺少"), okXlsx);
+    addChip("開啟方式: " + (location.protocol === "file:" ? "本機檔案 file://" : location.protocol), true);
+
+    if(!okPdf || !okXlsx){
+      $("notice").style.borderColor = "rgba(255,107,138,.35)";
+      $("notice").style.background = "rgba(255,107,138,.08)";
+      $("notice").querySelector("strong").textContent = "目前外部腳本載入失敗（被封鎖或離線）";
+    }
+  })();
+
+  // pdf.js worker
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.js";
+
+  function roundInt(n){ return Math.round((Number(n) + Number.EPSILON)); }
+  function cleanNum(s){
+    const t = String(s ?? "").replace(/[^\\d\\.\\-]/g,"");
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function dateToExcelSerial(dateUTC){
+    const epoch = Date.UTC(1899,11,30);
+    return (dateUTC.getTime() - epoch) / 86400000;
+  }
+  function isLikelyTracking(s){ return /^1Z[0-9A-Z]{16}$/i.test(s); }
+
+  function groupIntoLines(items){
+    const sorted = items
+      .filter(it => it.str && it.str.trim() !== "")
+      .map(it => ({...it, x: it.transform[4], y: it.transform[5]}))
+      .sort((a,b)=> (b.y - a.y) || (a.x - b.x));
+
+    const lines = [];
+    const tol = 2.0;
+    for(const it of sorted){
+      let line = lines.find(l => Math.abs(l.y - it.y) <= tol);
+      if(!line){ line = { y: it.y, items: [] }; lines.push(line); }
+      line.items.push(it);
+    }
+    for(const l of lines){
+      l.items.sort((a,b)=>a.x-b.x);
+      l.text = l.items.map(i=>i.str).join(" ").replace(/\\s+/g," ").trim();
+    }
+    return lines.sort((a,b)=>b.y-a.y);
+  }
+
+  const monthMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
+
+  function parseMdFromLineText(t){
+    const m1 = t.match(/\\b(\\d{1,2})\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\b/i);
+    if(m1){
+      const dd = parseInt(m1[1],10);
+      const mon = m1[2][0].toUpperCase()+m1[2].slice(1,3).toLowerCase();
+      const mm = monthMap[mon];
+      return mm ? `${mm}/${dd}` : null;
+    }
+    const m2 = t.match(/\\b(\\d{1,2})\\/(\\d{1,2})\\b/);
+    if(m2){
+      const mm = parseInt(m2[1],10), dd = parseInt(m2[2],10);
+      return `${mm}/${dd}`;
+    }
+    return null;
+  }
+
+  function shouldSkipLine(t){
+    const s = t.toLowerCase();
+    return s.includes("shipment total") ||
+           (s.includes("total") && (s.includes("adjustment") || s.includes("non-taxable") || s.includes("taxable"))) ||
+           s.includes("page:") ||
+           (s.includes("invoice") && s.includes("date"));
+  }
+
+  function extractCharge(lineText){
+    const nums = lineText.match(/-?\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?|-?\\d+(?:\\.\\d+)?/g);
+    if(!nums || nums.length === 0) return null;
+    const amount = cleanNum(nums[nums.length-1]);
+    let label = lineText.replace(nums[nums.length-1], "").trim();
+    label = label.replace(/\\b(TWD|NTD|USD|Charges?|Discount)\\b/gi,"").trim();
+    label = label.replace(/\\s+/g," ").trim();
+    if(label.length < 3) return null;
+    return { label, amount };
+  }
+
+  function normalizeFeeLabel(label){
+    const s = label.trim();
+    const map = [
+      [/^transportation/i, "Transportation"],
+      [/fuel surcharge/i, "Fuel Surcharge"],
+      [/duty and tax forwarding surcharge/i, "Duty & Tax Forwarding Surcharge"],
+      [/extended area surcharge.*destination/i, "Extended Area Surcharge-Destination"],
+      [/additional handling/i, "Additional Handling"],
+      [/warehouse fees?/i, "Warehouse Fees"],
+      [/print label/i, "Print Label"],
+      [/^vat$/i, "VAT"],
+      [/disbursement fee/i, "Disbursement Fee"],
+      [/entry prep fee/i, "Entry Prep Fee"],
+      [/paper commercial invoice/i, "Paper Commercial Invoice"],
+      [/^duty$/i, "Duty"],
+    ];
+    for(const [re, out] of map){ if(re.test(s)) return out; }
+    return s;
+  }
+
+  function findInvoiceYear(allText){
+    const m = allText.match(/\\bInvoice\\s*Date\\b[^0-9]*(\\d{4})[-\\/]\\d{1,2}[-\\/]\\d{1,2}/i)
+           || allText.match(/\\b(\\d{4})[-\\/]\\d{1,2}[-\\/]\\d{1,2}\\b/);
+    return m ? parseInt(m[1],10) : null;
+  }
+
+  function mdToDateUTC(md, year){
+    const [m,d] = String(md).split("/").map(x=>parseInt(x,10));
+    const y = Number.isFinite(year) ? year : (new Date()).getFullYear();
+    return new Date(Date.UTC(y, m-1, d));
+  }
+
+  async function parsePdf(file){
+    const arr = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: arr}).promise;
+
+    let allText = "";
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const lines = groupIntoLines(content.items);
+      allText += "\\n" + lines.map(l=>l.text).join("\\n");
+    }
+    const year = findInvoiceYear(allText);
+    log(`📄 解析：${file.name}（${pdf.numPages} 頁）→ 年份：${year ?? "未找到(用今年)"}`);
+
+    const summary = [];
+    const adjustments = [];
+
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const lines = groupIntoLines(content.items);
+      const pageText = lines.map(l=>l.text).join("\\n").toLowerCase();
+
+      const maybeWaybill = pageText.includes("tracking") || pageText.includes("waybill") || pageText.includes("提單") || pageText.includes("追蹤");
+      if(!maybeWaybill) continue;
+
+      const isAdjustmentPage =
+        pageText.includes("adjustment") ||
+        pageText.includes("調整明細") ||
+        pageText.includes("non-taxable adjustment") ||
+        pageText.includes("taxable adjustment");
+
+      for(let i=0;i<lines.length;i++){
+        const t = lines[i].text;
+        if(shouldSkipLine(t)) continue;
+
+        const md = parseMdFromLineText(t);
+        if(!md) continue;
+
+        const tokens = t.split(/\\s+/);
+        const trk = tokens.find(tok => isLikelyTracking(tok));
+        if(!trk) continue;
+
+        for(let j=i+1; j<Math.min(i+30, lines.length); j++){
+          const lt = lines[j].text;
+          if(shouldSkipLine(lt)) continue;
+
+          const md2 = parseMdFromLineText(lt);
+          const trk2 = lt.split(/\\s+/).find(tok => isLikelyTracking(tok));
+          if(md2 && trk2) break;
+
+          const ch = extractCharge(lt);
+          if(!ch) continue;
+
+          const fee = normalizeFeeLabel(ch.label);
+          const row = {file: file.name, md, year, tracking: trk, fee, net: ch.amount};
+          if(isAdjustmentPage) adjustments.push(row);
+          else summary.push(row);
+        }
+      }
+    }
+
+    log(`✅ ${file.name}：Summary=${summary.length} 列，Adjustments=${adjustments.length} 列`);
+    return {summary, adjustments};
+  }
+
+  function aggregateToWide(rows){
+    const exemptRe = new RegExp(`^(?:${$("exempt").value})$`, "i");
+    const taxRate = Number($("taxRate").value || "0.05");
+
+    const agg = new Map();
+    for(const r of rows){
+      const key = `${r.file}||${r.year}||${r.md}||${r.tracking}||${r.fee}`;
+      agg.set(key, (agg.get(key) || 0) + Number(r.net || 0));
+    }
+
+    const feeSet = new Set();
+    const wideMap = new Map();
+
+    for(const [k, amount] of agg.entries()){
+      const [file, yearStr, md, tracking, fee] = k.split("||");
+      const year = parseInt(yearStr,10);
+      feeSet.add(fee);
+      const k2 = `${file}||${year}||${md}||${tracking}`;
+      if(!wideMap.has(k2)){
+        wideMap.set(k2, { "檔名": file, "_year": year, "_md": md, "追蹤碼": tracking });
+      }
+      const obj = wideMap.get(k2);
+      obj[fee] = (obj[fee] || 0) + amount;
+    }
+
+    const feeCols = Array.from(feeSet).sort((a,b)=>a.localeCompare(b));
+    const out = Array.from(wideMap.values()).map(obj => {
+      for(const c of feeCols) obj[c] = obj[c] || 0;
+      const total = feeCols.reduce((s,c)=> s + Number(obj[c]||0), 0);
+      const taxBase = feeCols.reduce((s,c)=> s + (exemptRe.test(c) ? 0 : Number(obj[c]||0)), 0);
+      const tax = taxBase * taxRate;
+
+      for(const c of feeCols) obj[c] = roundInt(obj[c]);
+      obj["折扣後運費合計"] = roundInt(total);
+      obj["營業稅"] = roundInt(tax);
+      obj["全部加總"] = roundInt(roundInt(total) + roundInt(tax));
+      return obj;
+    });
+
+    const totalRow = {"檔名":"全部加總", "_year":"", "_md":"", "追蹤碼":""};
+    for(const c of feeCols.concat(["折扣後運費合計","營業稅","全部加總"])){
+      totalRow[c] = out.reduce((s,r)=> s + (Number(r[c])||0), 0);
+    }
+    out.push(totalRow);
+
+    const headers = ["檔名","日期","追蹤碼", ...feeCols, "折扣後運費合計","營業稅","全部加總"];
+
+    const finalRows = out.map(r => {
+      const md = r._md || "";
+      const year = r._year;
+      const excelDate = md ? dateToExcelSerial(mdToDateUTC(md, year)) : "";
+      const obj = {"檔名": r["檔名"], "日期": excelDate, "追蹤碼": r["追蹤碼"]};
+      for(const c of feeCols) obj[c] = r[c] ?? 0;
+      obj["折扣後運費合計"] = r["折扣後運費合計"] ?? 0;
+      obj["營業稅"] = r["營業稅"] ?? 0;
+      obj["全部加總"] = r["全部加總"] ?? 0;
+      return obj;
+    });
+
+    return {headers, rows: finalRows};
+  }
+
+  function renderPreview(headers, rows){
+    const thead = $("tbl").querySelector("thead");
+    const tbody = $("tbl").querySelector("tbody");
+    thead.innerHTML = ""; tbody.innerHTML = "";
+
+    const trh = document.createElement("tr");
+    for(const h of headers){
+      const th = document.createElement("th");
+      th.textContent = h;
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+
+    const max = Math.min(200, rows.length);
+    for(let i=0;i<max;i++){
+      const tr = document.createElement("tr");
+      for(const h of headers){
+        const td = document.createElement("td");
+        const v = rows[i][h];
+        if(h==="日期" && typeof v === "number"){
+          const js = new Date(Date.UTC(1899,11,30) + v*86400000);
+          td.textContent = `${js.getUTCFullYear()}-${String(js.getUTCMonth()+1).padStart(2,"0")}-${String(js.getUTCDate()).padStart(2,"0")}`;
+        } else td.textContent = (v ?? "").toString();
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  function exportExcel(summaryPack, adjPack){
+    const wb = XLSX.utils.book_new();
+
+    function addSheet(pack, name){
+      const ws = XLSX.utils.json_to_sheet(pack.rows, {header: pack.headers});
+      ws["!cols"] = pack.headers.map(h => ({ wch: Math.max(12, Math.min(34, h.length + 6)) }));
+
+      const dateColIdx = pack.headers.indexOf("日期");
+      if(dateColIdx >= 0){
+        const range = XLSX.utils.decode_range(ws["!ref"]);
+        for(let R=1; R<=range.e.r; R++){
+          const addr = XLSX.utils.encode_cell({r:R, c:dateColIdx});
+          const cell = ws[addr];
+          if(!cell) continue;
+          if(cell.v === "" || cell.v === null || cell.v === undefined){ continue; }
+          cell.t = "n";
+          cell.z = "yyyy-mm-dd";
+        }
+      }
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    }
+
+    addSheet(summaryPack, "Summary");
+    addSheet(adjPack, "Adjustments");
+
+    XLSX.writeFile(wb, `UPS_Bill_Summary_${new Date().toISOString().slice(0,10)}.xlsx`);
+  }
+
+  let pickedFiles = [];
+  let lastSummary = null;
+  let lastAdjustments = null;
+
+  function setFiles(files){
+    pickedFiles = Array.from(files || []).filter(f => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"));
+    $("run").disabled = pickedFiles.length === 0;
+    $("export").disabled = true;
+    $("log").textContent = pickedFiles.length ? `已選 ${pickedFiles.length} 份 PDF：\\n- ${pickedFiles.map(f=>f.name).join("\\n- ")}` : "尚未開始";
+  }
+
+  $("file").addEventListener("change", (e)=> setFiles(e.target.files));
+  $("drop").addEventListener("dragover", (e)=>{ e.preventDefault(); $("drop").style.borderColor="rgba(115,243,197,.6)"; });
+  $("drop").addEventListener("dragleave", ()=>{ $("drop").style.borderColor="rgba(255,255,255,.25)"; });
+  $("drop").addEventListener("drop", (e)=>{
+    e.preventDefault();
+    $("drop").style.borderColor="rgba(255,255,255,.25)";
+    setFiles(e.dataTransfer.files);
+  });
+
+  $("run").addEventListener("click", async ()=>{
+    $("run").disabled = true;
+    $("export").disabled = true;
+    $("log").textContent = "開始解析…";
+
+    const allSummary = [];
+    const allAdj = [];
+
+    for(const f of pickedFiles){
+      try{
+        const {summary, adjustments} = await parsePdf(f);
+        allSummary.push(...summary);
+        allAdj.push(...adjustments);
+      }catch(err){
+        log(`❌ ${f.name} 解析失敗：${err?.message || err}`);
+      }
+    }
+
+    log(`\\n📦 合計：Summary=${allSummary.length} 列，Adjustments=${allAdj.length} 列（pivot 前）`);
+
+    lastSummary = aggregateToWide(allSummary);
+    lastAdjustments = aggregateToWide(allAdj);
+
+    renderPreview(lastSummary.headers, lastSummary.rows);
+    $("export").disabled = false;
+    $("run").disabled = false;
+
+    log(`✅ 完成：Summary ${lastSummary.rows.length-1} 筆（不含最後加總列）；Adjustments ${lastAdjustments.rows.length-1} 筆`);
+  });
+
+  $("export").addEventListener("click", ()=>{
+    if(!lastSummary || !lastAdjustments) return;
+    exportExcel(lastSummary, lastAdjustments);
+  });
+</script>
+</body>
+</html>
