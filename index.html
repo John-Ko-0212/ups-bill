@@ -4,8 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UPS 帳單彙整（Net Charge）</title>
-
-  <!-- v3: robust CDN fallback loader (jsDelivr -> unpkg -> cdnjs) -->
   <style>
     :root{
       --bg:#0b1220; --muted:#9fb0d0; --text:#e8efff; --line:rgba(255,255,255,.12);
@@ -81,13 +79,13 @@
 <body>
 <header>
   <h1>UPS 帳單彙整（Net Charge）</h1>
-  <div class="pill">GitHub Pages 版 · v3（CDN fallback）</div>
+  <div class="pill">GitHub Pages 版 · v4（Worker 關閉）</div>
 </header>
 
 <div class="banner">
   <div class="notice" id="notice">
-    <div><strong>如果按鈕不能按</strong>：通常是公司網路擋了 CDN（pdf.js / xlsx 沒載入）。</div>
-    <div>此版本會自動切換 CDN（jsDelivr → unpkg → cdnjs），並在下方顯示載入狀態。</div>
+    <div><strong>你現在看到 v4</strong>：這版強制 <code>disableWorker</code>，就算公司資安擋 Web Worker 也能解析。</div>
+    <div>下方 chips 會顯示：套件是否載入、以及是否成功啟動。</div>
     <div class="status" id="statusRow"></div>
   </div>
 </div>
@@ -118,10 +116,7 @@
       </div>
 
       <div class="hint">
-        - Summary：抓 Waybill Summary 的每票費用（取最右側 Net/Charge）。<br/>
-        - Adjustments：抓 Adjustment/Adjustment Total 類頁面的費用，另外列出（不混在 Summary）。<br/>
-        - 年份：每份 PDF 先從頁面文字找 Invoice Date 的年份，然後套在出貨日期上。<br/>
-        - 數字：四捨五入到個位數；營業稅 = (總額扣掉免稅項) × 稅率。
+        若你點「開始彙整」後仍不動：請打開 Chrome DevTools → Console，看紅字錯誤（通常會是 CDN 被擋或檔案權限問題）。
       </div>
     </div>
   </section>
@@ -143,7 +138,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const log = (msg) => { $("log").textContent += ( ($("log").textContent==="尚未開始") ? "" : "\\n") + msg; };
+  const log = (msg) => { $("log").textContent += ( ($("log").textContent==="尚未開始") ? "" : "\n") + msg; };
   function addChip(text, ok){
     const el = document.createElement("div");
     el.className = "chip " + (ok ? "good" : "bad");
@@ -151,7 +146,19 @@
     $("statusRow").appendChild(el);
   }
 
-  async function loadScriptWithFallback(label, urls){
+  window.addEventListener("error", (e) => {
+    console.error(e?.error || e);
+    addChip("JS error: " + (e?.message || "unknown"), false);
+    log("❌ JS error: " + (e?.message || "unknown"));
+  });
+
+  window.addEventListener("unhandledrejection", (e) => {
+    console.error(e?.reason || e);
+    addChip("Promise reject: " + (e?.reason?.message || String(e?.reason || "unknown")), false);
+    log("❌ Promise reject: " + (e?.reason?.message || String(e?.reason || "unknown")));
+  });
+
+  async function loadScript(label, urls){
     for(const url of urls){
       try{
         await new Promise((resolve, reject) => {
@@ -172,318 +179,308 @@
     throw new Error(label + " failed to load from all mirrors");
   }
 
-  async function boot(){
-    addChip("開啟方式: " + location.protocol, true);
+  function roundInt(n){ return Math.round((Number(n) + Number.EPSILON)); }
+  function cleanNum(s){
+    const t = String(s ?? "").replace(/[^\d\.\-]/g,"");
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function dateToExcelSerial(dateUTC){
+    const epoch = Date.UTC(1899,11,30);
+    return (dateUTC.getTime() - epoch) / 86400000;
+  }
+  function isLikelyTracking(s){ return /^1Z[0-9A-Z]{16}$/i.test(s); }
 
-    await loadScriptWithFallback("pdf.js", [
+  function groupIntoLines(items){
+    const sorted = items
+      .filter(it => it.str && it.str.trim() !== "")
+      .map(it => ({...it, x: it.transform[4], y: it.transform[5]}))
+      .sort((a,b)=> (b.y - a.y) || (a.x - b.x));
+
+    const lines = [];
+    const tol = 2.0;
+    for(const it of sorted){
+      let line = lines.find(l => Math.abs(l.y - it.y) <= tol);
+      if(!line){ line = { y: it.y, items: [] }; lines.push(line); }
+      line.items.push(it);
+    }
+    for(const l of lines){
+      l.items.sort((a,b)=>a.x-b.x);
+      l.text = l.items.map(i=>i.str).join(" ").replace(/\s+/g," ").trim();
+    }
+    return lines.sort((a,b)=>b.y-a.y);
+  }
+
+  const monthMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
+  function parseMdFromLineText(t){
+    const m1 = t.match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i);
+    if(m1){
+      const dd = parseInt(m1[1],10);
+      const mon = m1[2][0].toUpperCase()+m1[2].slice(1,3).toLowerCase();
+      const mm = monthMap[mon];
+      return mm ? `${mm}/${dd}` : null;
+    }
+    const m2 = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
+    if(m2){
+      const mm = parseInt(m2[1],10), dd = parseInt(m2[2],10);
+      return `${mm}/${dd}`;
+    }
+    return null;
+  }
+
+  function shouldSkipLine(t){
+    const s = t.toLowerCase();
+    return s.includes("shipment total") ||
+           (s.includes("total") && (s.includes("adjustment") || s.includes("non-taxable") || s.includes("taxable"))) ||
+           s.includes("page:") ||
+           (s.includes("invoice") && s.includes("date"));
+  }
+
+  function extractCharge(lineText){
+    const nums = lineText.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/g);
+    if(!nums || nums.length === 0) return null;
+    const amount = cleanNum(nums[nums.length-1]);
+    let label = lineText.replace(nums[nums.length-1], "").trim();
+    label = label.replace(/\b(TWD|NTD|USD|Charges?|Discount)\b/gi,"").trim();
+    label = label.replace(/\s+/g," ").trim();
+    if(label.length < 3) return null;
+    return { label, amount };
+  }
+
+  function normalizeFeeLabel(label){
+    const s = label.trim();
+    const map = [
+      [/^transportation/i, "Transportation"],
+      [/fuel surcharge/i, "Fuel Surcharge"],
+      [/duty and tax forwarding surcharge/i, "Duty & Tax Forwarding Surcharge"],
+      [/extended area surcharge.*destination/i, "Extended Area Surcharge-Destination"],
+      [/additional handling/i, "Additional Handling"],
+      [/warehouse fees?/i, "Warehouse Fees"],
+      [/print label/i, "Print Label"],
+      [/^vat$/i, "VAT"],
+      [/disbursement fee/i, "Disbursement Fee"],
+      [/entry prep fee/i, "Entry Prep Fee"],
+      [/paper commercial invoice/i, "Paper Commercial Invoice"],
+      [/^duty$/i, "Duty"],
+    ];
+    for(const [re, out] of map){ if(re.test(s)) return out; }
+    return s;
+  }
+
+  function findInvoiceYear(allText){
+    const m = allText.match(/\bInvoice\s*Date\b[^0-9]*(\d{4})[-\/]\d{1,2}[-\/]\d{1,2}/i)
+           || allText.match(/\b(\d{4})[-\/]\d{1,2}[-\/]\d{1,2}\b/);
+    return m ? parseInt(m[1],10) : null;
+  }
+
+  function mdToDateUTC(md, year){
+    const [m,d] = String(md).split("/").map(x=>parseInt(x,10));
+    const y = Number.isFinite(year) ? year : (new Date()).getFullYear();
+    return new Date(Date.UTC(y, m-1, d));
+  }
+
+  async function parsePdfFile(file){
+    const arr = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: arr, disableWorker: true }).promise;
+
+    let allText = "";
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const lines = groupIntoLines(content.items);
+      allText += "\n" + lines.map(l=>l.text).join("\n");
+    }
+    const year = findInvoiceYear(allText);
+    log(`📄 解析：${file.name}（${pdf.numPages} 頁）→ 年份：${year ?? "未找到(用今年)"}`);
+
+    const summary = [];
+    const adjustments = [];
+
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const lines = groupIntoLines(content.items);
+      const pageText = lines.map(l=>l.text).join("\n").toLowerCase();
+
+      const maybeWaybill = pageText.includes("tracking") || pageText.includes("waybill") || pageText.includes("提單") || pageText.includes("追蹤");
+      if(!maybeWaybill) continue;
+
+      const isAdjustmentPage =
+        pageText.includes("adjustment") ||
+        pageText.includes("non-taxable adjustment") ||
+        pageText.includes("taxable adjustment");
+
+      for(let i=0;i<lines.length;i++){
+        const t = lines[i].text;
+        if(shouldSkipLine(t)) continue;
+
+        const md = parseMdFromLineText(t);
+        if(!md) continue;
+
+        const tokens = t.split(/\s+/);
+        const trk = tokens.find(tok => isLikelyTracking(tok));
+        if(!trk) continue;
+
+        for(let j=i+1; j<Math.min(i+30, lines.length); j++){
+          const lt = lines[j].text;
+          if(shouldSkipLine(lt)) continue;
+
+          const md2 = parseMdFromLineText(lt);
+          const trk2 = lt.split(/\s+/).find(tok => isLikelyTracking(tok));
+          if(md2 && trk2) break;
+
+          const ch = extractCharge(lt);
+          if(!ch) continue;
+
+          const fee = normalizeFeeLabel(ch.label);
+          const row = {file: file.name, md, year, tracking: trk, fee, net: ch.amount};
+          if(isAdjustmentPage) adjustments.push(row);
+          else summary.push(row);
+        }
+      }
+    }
+
+    log(`✅ ${file.name}：Summary=${summary.length} 列，Adjustments=${adjustments.length} 列`);
+    return {summary, adjustments};
+  }
+
+  function aggregateToWide(rows){
+    const exemptRe = new RegExp(`^(?:${$("exempt").value})$`, "i");
+    const taxRate = Number($("taxRate").value || "0.05");
+
+    const agg = new Map();
+    for(const r of rows){
+      const key = `${r.file}||${r.year}||${r.md}||${r.tracking}||${r.fee}`;
+      agg.set(key, (agg.get(key) || 0) + Number(r.net || 0));
+    }
+
+    const feeSet = new Set();
+    const wideMap = new Map();
+
+    for(const [k, amount] of agg.entries()){
+      const [file, yearStr, md, tracking, fee] = k.split("||");
+      const year = parseInt(yearStr,10);
+      feeSet.add(fee);
+      const k2 = `${file}||${year}||${md}||${tracking}`;
+      if(!wideMap.has(k2)){
+        wideMap.set(k2, { "檔名": file, "_year": year, "_md": md, "追蹤碼": tracking });
+      }
+      const obj = wideMap.get(k2);
+      obj[fee] = (obj[fee] || 0) + amount;
+    }
+
+    const feeCols = Array.from(feeSet).sort((a,b)=>a.localeCompare(b));
+    const out = Array.from(wideMap.values()).map(obj => {
+      for(const c of feeCols) obj[c] = obj[c] || 0;
+      const total = feeCols.reduce((s,c)=> s + Number(obj[c]||0), 0);
+      const taxBase = feeCols.reduce((s,c)=> s + (exemptRe.test(c) ? 0 : Number(obj[c]||0)), 0);
+      const tax = taxBase * taxRate;
+
+      for(const c of feeCols) obj[c] = roundInt(obj[c]);
+      obj["折扣後運費合計"] = roundInt(total);
+      obj["營業稅"] = roundInt(tax);
+      obj["全部加總"] = roundInt(roundInt(total) + roundInt(tax));
+      return obj;
+    });
+
+    const totalRow = {"檔名":"全部加總", "_year":"", "_md":"", "追蹤碼":""};
+    for(const c of feeCols.concat(["折扣後運費合計","營業稅","全部加總"])){
+      totalRow[c] = out.reduce((s,r)=> s + (Number(r[c])||0), 0);
+    }
+    out.push(totalRow);
+
+    const headers = ["檔名","日期","追蹤碼", ...feeCols, "折扣後運費合計","營業稅","全部加總"];
+
+    const finalRows = out.map(r => {
+      const md = r._md || "";
+      const year = r._year;
+      const excelDate = md ? dateToExcelSerial(mdToDateUTC(md, year)) : "";
+      const obj = {"檔名": r["檔名"], "日期": excelDate, "追蹤碼": r["追蹤碼"]};
+      for(const c of feeCols) obj[c] = r[c] ?? 0;
+      obj["折扣後運費合計"] = r["折扣後運費合計"] ?? 0;
+      obj["營業稅"] = r["營業稅"] ?? 0;
+      obj["全部加總"] = r["全部加總"] ?? 0;
+      return obj;
+    });
+
+    return {headers, rows: finalRows};
+  }
+
+  function renderPreview(headers, rows){
+    const thead = $("tbl").querySelector("thead");
+    const tbody = $("tbl").querySelector("tbody");
+    thead.innerHTML = ""; tbody.innerHTML = "";
+
+    const trh = document.createElement("tr");
+    for(const h of headers){
+      const th = document.createElement("th");
+      th.textContent = h;
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+
+    const max = Math.min(200, rows.length);
+    for(let i=0;i<max;i++){
+      const tr = document.createElement("tr");
+      for(const h of headers){
+        const td = document.createElement("td");
+        const v = rows[i][h];
+        if(h==="日期" && typeof v === "number"){
+          const js = new Date(Date.UTC(1899,11,30) + v*86400000);
+          td.textContent = `${js.getUTCFullYear()}-${String(js.getUTCMonth()+1).padStart(2,"0")}-${String(js.getUTCDate()).padStart(2,"0")}`;
+        } else td.textContent = (v ?? "").toString();
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  function exportExcel(summaryPack, adjPack){
+    const wb = window.XLSX.utils.book_new();
+
+    const addSheet = (pack, name) => {
+      const ws = window.XLSX.utils.json_to_sheet(pack.rows, {header: pack.headers});
+      ws["!cols"] = pack.headers.map(h => ({ wch: Math.max(12, Math.min(34, h.length + 6)) }));
+      const dateColIdx = pack.headers.indexOf("日期");
+      if(dateColIdx >= 0){
+        const range = window.XLSX.utils.decode_range(ws["!ref"]);
+        for(let R=1; R<=range.e.r; R++){
+          const addr = window.XLSX.utils.encode_cell({r:R, c:dateColIdx});
+          const cell = ws[addr];
+          if(!cell) continue;
+          if(cell.v === "" || cell.v === null || cell.v === undefined){ continue; }
+          cell.t = "n";
+          cell.z = "yyyy-mm-dd";
+        }
+      }
+      window.XLSX.utils.book_append_sheet(wb, ws, name);
+    };
+
+    addSheet(summaryPack, "Summary");
+    addSheet(adjPack, "Adjustments");
+    window.XLSX.writeFile(wb, `UPS_Bill_Summary_${new Date().toISOString().slice(0,10)}.xlsx`);
+  }
+
+  async function boot(){
+    addChip("protocol: " + location.protocol, true);
+
+    await loadScript("pdf.js", [
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.js",
       "https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.js",
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"
     ]);
 
-    await loadScriptWithFallback("xlsx", [
+    await loadScript("xlsx", [
       "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
       "https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js",
       "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
     ]);
 
-    const workerCandidates = [
-      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.js",
-      "https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js"
-    ];
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc = workerCandidates[0];
-    addChip("pdf worker: set", true);
+    addChip("pdf worker: disabled", true);
+    addChip("runtime: ready", true);
 
-    addChip("Runtime: ready", true);
-    initApp();
-  }
-
-  function initApp(){
-    function roundInt(n){ return Math.round((Number(n) + Number.EPSILON)); }
-    function cleanNum(s){
-      const t = String(s ?? "").replace(/[^\\d\\.\\-]/g,"");
-      const n = Number(t);
-      return Number.isFinite(n) ? n : 0;
-    }
-    function dateToExcelSerial(dateUTC){
-      const epoch = Date.UTC(1899,11,30);
-      return (dateUTC.getTime() - epoch) / 86400000;
-    }
-    function isLikelyTracking(s){ return /^1Z[0-9A-Z]{16}$/i.test(s); }
-
-    function groupIntoLines(items){
-      const sorted = items
-        .filter(it => it.str && it.str.trim() !== "")
-        .map(it => ({...it, x: it.transform[4], y: it.transform[5]}))
-        .sort((a,b)=> (b.y - a.y) || (a.x - b.x));
-
-      const lines = [];
-      const tol = 2.0;
-      for(const it of sorted){
-        let line = lines.find(l => Math.abs(l.y - it.y) <= tol);
-        if(!line){ line = { y: it.y, items: [] }; lines.push(line); }
-        line.items.push(it);
-      }
-      for(const l of lines){
-        l.items.sort((a,b)=>a.x-b.x);
-        l.text = l.items.map(i=>i.str).join(" ").replace(/\\s+/g," ").trim();
-      }
-      return lines.sort((a,b)=>b.y-a.y);
-    }
-
-    const monthMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
-
-    function parseMdFromLineText(t){
-      const m1 = t.match(/\\b(\\d{1,2})\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\b/i);
-      if(m1){
-        const dd = parseInt(m1[1],10);
-        const mon = m1[2][0].toUpperCase()+m1[2].slice(1,3).toLowerCase();
-        const mm = monthMap[mon];
-        return mm ? `${mm}/${dd}` : null;
-      }
-      const m2 = t.match(/\\b(\\d{1,2})\\/(\\d{1,2})\\b/);
-      if(m2){
-        const mm = parseInt(m2[1],10), dd = parseInt(m2[2],10);
-        return `${mm}/${dd}`;
-      }
-      return null;
-    }
-
-    function shouldSkipLine(t){
-      const s = t.toLowerCase();
-      return s.includes("shipment total") ||
-            (s.includes("total") && (s.includes("adjustment") || s.includes("non-taxable") || s.includes("taxable"))) ||
-            s.includes("page:") ||
-            (s.includes("invoice") && s.includes("date"));
-    }
-
-    function extractCharge(lineText){
-      const nums = lineText.match(/-?\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?|-?\\d+(?:\\.\\d+)?/g);
-      if(!nums || nums.length === 0) return null;
-      const amount = cleanNum(nums[nums.length-1]);
-      let label = lineText.replace(nums[nums.length-1], "").trim();
-      label = label.replace(/\\b(TWD|NTD|USD|Charges?|Discount)\\b/gi,"").trim();
-      label = label.replace(/\\s+/g," ").trim();
-      if(label.length < 3) return null;
-      return { label, amount };
-    }
-
-    function normalizeFeeLabel(label){
-      const s = label.trim();
-      const map = [
-        [/^transportation/i, "Transportation"],
-        [/fuel surcharge/i, "Fuel Surcharge"],
-        [/duty and tax forwarding surcharge/i, "Duty & Tax Forwarding Surcharge"],
-        [/extended area surcharge.*destination/i, "Extended Area Surcharge-Destination"],
-        [/additional handling/i, "Additional Handling"],
-        [/warehouse fees?/i, "Warehouse Fees"],
-        [/print label/i, "Print Label"],
-        [/^vat$/i, "VAT"],
-        [/disbursement fee/i, "Disbursement Fee"],
-        [/entry prep fee/i, "Entry Prep Fee"],
-        [/paper commercial invoice/i, "Paper Commercial Invoice"],
-        [/^duty$/i, "Duty"],
-      ];
-      for(const [re, out] of map){ if(re.test(s)) return out; }
-      return s;
-    }
-
-    function findInvoiceYear(allText){
-      const m = allText.match(/\\bInvoice\\s*Date\\b[^0-9]*(\\d{4})[-\\/]\\d{1,2}[-\\/]\\d{1,2}/i)
-            || allText.match(/\\b(\\d{4})[-\\/]\\d{1,2}[-\\/]\\d{1,2}\\b/);
-      return m ? parseInt(m[1],10) : null;
-    }
-
-    function mdToDateUTC(md, year){
-      const [m,d] = String(md).split("/").map(x=>parseInt(x,10));
-      const y = Number.isFinite(year) ? year : (new Date()).getFullYear();
-      return new Date(Date.UTC(y, m-1, d));
-    }
-
-    async function parsePdf(file){
-      const arr = await file.arrayBuffer();
-      const pdf = await window.pdfjsLib.getDocument({data: arr}).promise;
-
-      let allText = "";
-      for(let p=1; p<=pdf.numPages; p++){
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        const lines = groupIntoLines(content.items);
-        allText += "\\n" + lines.map(l=>l.text).join("\\n");
-      }
-      const year = findInvoiceYear(allText);
-      log(`📄 解析：${file.name}（${pdf.numPages} 頁）→ 年份：${year ?? "未找到(用今年)"}`);
-
-      const summary = [];
-      const adjustments = [];
-
-      for(let p=1; p<=pdf.numPages; p++){
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        const lines = groupIntoLines(content.items);
-        const pageText = lines.map(l=>l.text).join("\\n").toLowerCase();
-
-        const maybeWaybill = pageText.includes("tracking") || pageText.includes("waybill") || pageText.includes("提單") || pageText.includes("追蹤");
-        if(!maybeWaybill) continue;
-
-        const isAdjustmentPage =
-          pageText.includes("adjustment") ||
-          pageText.includes("調整明細") ||
-          pageText.includes("non-taxable adjustment") ||
-          pageText.includes("taxable adjustment");
-
-        for(let i=0;i<lines.length;i++){
-          const t = lines[i].text;
-          if(shouldSkipLine(t)) continue;
-
-          const md = parseMdFromLineText(t);
-          if(!md) continue;
-
-          const tokens = t.split(/\\s+/);
-          const trk = tokens.find(tok => isLikelyTracking(tok));
-          if(!trk) continue;
-
-          for(let j=i+1; j<Math.min(i+30, lines.length); j++){
-            const lt = lines[j].text;
-            if(shouldSkipLine(lt)) continue;
-
-            const md2 = parseMdFromLineText(lt);
-            const trk2 = lt.split(/\\s+/).find(tok => isLikelyTracking(tok));
-            if(md2 && trk2) break;
-
-            const ch = extractCharge(lt);
-            if(!ch) continue;
-
-            const fee = normalizeFeeLabel(ch.label);
-            const row = {file: file.name, md, year, tracking: trk, fee, net: ch.amount};
-            if(isAdjustmentPage) adjustments.push(row);
-            else summary.push(row);
-          }
-        }
-      }
-
-      log(`✅ ${file.name}：Summary=${summary.length} 列，Adjustments=${adjustments.length} 列`);
-      return {summary, adjustments};
-    }
-
-    function aggregateToWide(rows){
-      const exemptRe = new RegExp(`^(?:${$("exempt").value})$`, "i");
-      const taxRate = Number($("taxRate").value || "0.05");
-
-      const agg = new Map();
-      for(const r of rows){
-        const key = `${r.file}||${r.year}||${r.md}||${r.tracking}||${r.fee}`;
-        agg.set(key, (agg.get(key) || 0) + Number(r.net || 0));
-      }
-
-      const feeSet = new Set();
-      const wideMap = new Map();
-
-      for(const [k, amount] of agg.entries()){
-        const [file, yearStr, md, tracking, fee] = k.split("||");
-        const year = parseInt(yearStr,10);
-        feeSet.add(fee);
-        const k2 = `${file}||${year}||${md}||${tracking}`;
-        if(!wideMap.has(k2)){
-          wideMap.set(k2, { "檔名": file, "_year": year, "_md": md, "追蹤碼": tracking });
-        }
-        const obj = wideMap.get(k2);
-        obj[fee] = (obj[fee] || 0) + amount;
-      }
-
-      const feeCols = Array.from(feeSet).sort((a,b)=>a.localeCompare(b));
-      const out = Array.from(wideMap.values()).map(obj => {
-        for(const c of feeCols) obj[c] = obj[c] || 0;
-        const total = feeCols.reduce((s,c)=> s + Number(obj[c]||0), 0);
-        const taxBase = feeCols.reduce((s,c)=> s + (exemptRe.test(c) ? 0 : Number(obj[c]||0)), 0);
-        const tax = taxBase * taxRate;
-
-        for(const c of feeCols) obj[c] = roundInt(obj[c]);
-        obj["折扣後運費合計"] = roundInt(total);
-        obj["營業稅"] = roundInt(tax);
-        obj["全部加總"] = roundInt(roundInt(total) + roundInt(tax));
-        return obj;
-      });
-
-      const totalRow = {"檔名":"全部加總", "_year":"", "_md":"", "追蹤碼":""};
-      for(const c of feeCols.concat(["折扣後運費合計","營業稅","全部加總"])){
-        totalRow[c] = out.reduce((s,r)=> s + (Number(r[c])||0), 0);
-      }
-      out.push(totalRow);
-
-      const headers = ["檔名","日期","追蹤碼", ...feeCols, "折扣後運費合計","營業稅","全部加總"];
-
-      const finalRows = out.map(r => {
-        const md = r._md || "";
-        const year = r._year;
-        const excelDate = md ? dateToExcelSerial(mdToDateUTC(md, year)) : "";
-        const obj = {"檔名": r["檔名"], "日期": excelDate, "追蹤碼": r["追蹤碼"]};
-        for(const c of feeCols) obj[c] = r[c] ?? 0;
-        obj["折扣後運費合計"] = r["折扣後運費合計"] ?? 0;
-        obj["營業稅"] = r["營業稅"] ?? 0;
-        obj["全部加總"] = r["全部加總"] ?? 0;
-        return obj;
-      });
-
-      return {headers, rows: finalRows};
-    }
-
-    function renderPreview(headers, rows){
-      const thead = $("tbl").querySelector("thead");
-      const tbody = $("tbl").querySelector("tbody");
-      thead.innerHTML = ""; tbody.innerHTML = "";
-
-      const trh = document.createElement("tr");
-      for(const h of headers){
-        const th = document.createElement("th");
-        th.textContent = h;
-        trh.appendChild(th);
-      }
-      thead.appendChild(trh);
-
-      const max = Math.min(200, rows.length);
-      for(let i=0;i<max;i++){
-        const tr = document.createElement("tr");
-        for(const h of headers){
-          const td = document.createElement("td");
-          const v = rows[i][h];
-          if(h==="日期" && typeof v === "number"){
-            const js = new Date(Date.UTC(1899,11,30) + v*86400000);
-            td.textContent = `${js.getUTCFullYear()}-${String(js.getUTCMonth()+1).padStart(2,"0")}-${String(js.getUTCDate()).padStart(2,"0")}`;
-          } else td.textContent = (v ?? "").toString();
-          tr.appendChild(td);
-        }
-        tbody.appendChild(tr);
-      }
-    }
-
-    function exportExcel(summaryPack, adjPack){
-      const wb = window.XLSX.utils.book_new();
-
-      function addSheet(pack, name){
-        const ws = window.XLSX.utils.json_to_sheet(pack.rows, {header: pack.headers});
-        ws["!cols"] = pack.headers.map(h => ({ wch: Math.max(12, Math.min(34, h.length + 6)) }));
-
-        const dateColIdx = pack.headers.indexOf("日期");
-        if(dateColIdx >= 0){
-          const range = window.XLSX.utils.decode_range(ws["!ref"]);
-          for(let R=1; R<=range.e.r; R++){
-            const addr = window.XLSX.utils.encode_cell({r:R, c:dateColIdx});
-            const cell = ws[addr];
-            if(!cell) continue;
-            if(cell.v === "" || cell.v === null || cell.v === undefined){ continue; }
-            cell.t = "n";
-            cell.z = "yyyy-mm-dd";
-          }
-        }
-        window.XLSX.utils.book_append_sheet(wb, ws, name);
-      }
-
-      addSheet(summaryPack, "Summary");
-      addSheet(adjPack, "Adjustments");
-      window.XLSX.writeFile(wb, `UPS_Bill_Summary_${new Date().toISOString().slice(0,10)}.xlsx`);
-    }
+    const runBtn = $("run");
+    const exportBtn = $("export");
 
     let pickedFiles = [];
     let lastSummary = null;
@@ -491,9 +488,9 @@
 
     function setFiles(files){
       pickedFiles = Array.from(files || []).filter(f => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"));
-      $("run").disabled = pickedFiles.length === 0;
-      $("export").disabled = true;
-      $("log").textContent = pickedFiles.length ? `已選 ${pickedFiles.length} 份 PDF：\\n- ${pickedFiles.map(f=>f.name).join("\\n- ")}` : "尚未開始";
+      runBtn.disabled = pickedFiles.length === 0;
+      exportBtn.disabled = true;
+      $("log").textContent = pickedFiles.length ? `已選 ${pickedFiles.length} 份 PDF：\n- ${pickedFiles.map(f=>f.name).join("\n- ")}` : "尚未開始";
     }
 
     $("file").addEventListener("change", (e)=> setFiles(e.target.files));
@@ -505,9 +502,9 @@
       setFiles(e.dataTransfer.files);
     });
 
-    $("run").addEventListener("click", async ()=>{
-      $("run").disabled = true;
-      $("export").disabled = true;
+    runBtn.addEventListener("click", async ()=>{
+      runBtn.disabled = true;
+      exportBtn.disabled = true;
       $("log").textContent = "開始解析…";
 
       const allSummary = [];
@@ -515,41 +512,43 @@
 
       for(const f of pickedFiles){
         try{
-          const {summary, adjustments} = await parsePdf(f);
+          const {summary, adjustments} = await parsePdfFile(f);
           allSummary.push(...summary);
           allAdj.push(...adjustments);
         }catch(err){
+          console.error(err);
           log(`❌ ${f.name} 解析失敗：${err?.message || err}`);
         }
       }
 
-      log(`\\n📦 合計：Summary=${allSummary.length} 列，Adjustments=${allAdj.length} 列（pivot 前）`);
+      log(`\n📦 合計：Summary=${allSummary.length} 列，Adjustments=${allAdj.length} 列（pivot 前）`);
 
       lastSummary = aggregateToWide(allSummary);
       lastAdjustments = aggregateToWide(allAdj);
 
       renderPreview(lastSummary.headers, lastSummary.rows);
-      $("export").disabled = false;
-      $("run").disabled = false;
+      exportBtn.disabled = false;
+      runBtn.disabled = false;
 
       log(`✅ 完成：Summary ${lastSummary.rows.length-1} 筆（不含最後加總列）；Adjustments ${lastAdjustments.rows.length-1} 筆`);
     });
 
-    $("export").addEventListener("click", ()=>{
+    exportBtn.addEventListener("click", ()=>{
       if(!lastSummary || !lastAdjustments) return;
       exportExcel(lastSummary, lastAdjustments);
     });
 
-    addChip("UI: ready", true);
+    addChip("UI: wired", true);
   }
 
   boot().catch(err => {
     console.error(err);
-    log("❌ 啟動失敗：可能是公司網路擋掉 CDN。\\n" + (err?.message || err));
+    addChip("boot failed: " + (err?.message || err), false);
+    log("❌ 啟動失敗：\n" + (err?.message || err));
     const notice = $("notice");
     notice.style.borderColor = "rgba(255,107,138,.35)";
     notice.style.background = "rgba(255,107,138,.08)";
-    notice.querySelector("strong").textContent = "無法載入必要的前端套件（pdf.js / xlsx）";
+    notice.querySelector("strong").textContent = "啟動失敗（多半是 CDN 被擋）";
   });
 </script>
 </body>
